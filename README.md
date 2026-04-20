@@ -10,7 +10,7 @@ Small React tool to compare two RuneScape Leagues players by:
 
 - Compares exactly 2 players.
 - Uses a built-in task catalog parsed from `tasks_from_wiki.md` at app startup.
-- Uses a small Node server to fetch RuneScape Wiki data server-side.
+- Uses the shared `/api/player` route locally and on Vercel to fetch RuneScape Wiki data server-side.
 - Supports tier points mapping:
   - easy = 10
   - medium = 30
@@ -25,7 +25,8 @@ npm install
 npm run dev
 ```
 
-`npm run dev` starts both the Node API server and the Vite client. If you want the backend alone, run `npm run start`.
+`npm run dev` starts the Vite client and serves `/api/player` through Vite middleware.
+`npm run start` runs the same local Vite setup for parity.
 
 Build check:
 
@@ -41,7 +42,7 @@ npm run build
 
 ## API Endpoint Shape
 
-The Node server fetches the RuneScape Wiki sync endpoint in this shape:
+The shared API route fetches the RuneScape Wiki sync endpoint in this shape:
 
 `https://sync.runescape.wiki/runelite/player/<username>/<league_id>`
 
@@ -51,15 +52,12 @@ Important fields used:
 
 ## Config
 
-- `PORT` controls the Node server port. Default is `8787`.
-- `HOST` controls bind address. Default is `127.0.0.1`.
-- `ALLOW_REMOTE_CLIENTS` defaults to `false`; leave this unset for local-only API access.
 - `REQUEST_TIMEOUT_MS` controls upstream timeout (default `8000`).
 - `RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX_REQUESTS` control API rate limiting.
 - `CACHE_TTL_MS` controls short-lived player response cache TTL.
 
 ## Notes
 
-- Player fetches now go through a small Node API server so the browser never talks to the wiki directly.
+- Player fetches now go through the shared API route so the browser never talks to the wiki directly.
 - If direct sync requests are rejected by network edge protections, the backend falls back to a mirror transport and still returns JSON to the frontend.
 - Task metadata is no longer user-provided in the UI; it is bundled with the app.

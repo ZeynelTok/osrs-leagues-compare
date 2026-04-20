@@ -4,6 +4,30 @@ function normalizeUsername(raw: string): string {
   return raw.trim()
 }
 
+function formatApiError(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value
+  }
+
+  if (value instanceof Error) {
+    return value.message
+  }
+
+  if (value && typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return '[unserializable error details]'
+    }
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+
+  return null
+}
+
 export async function fetchPlayerProfile(username: string): Promise<PlayerProfile> {
   const safeUsername = normalizeUsername(username)
 
@@ -19,14 +43,17 @@ export async function fetchPlayerProfile(username: string): Promise<PlayerProfil
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
-      | { error?: string; details?: string; code?: string }
+      | { error?: unknown; details?: unknown; code?: string }
       | null
 
     if (payload?.code === 'NO_USER_DATA') {
       throw new Error(`No RuneScape Wiki sync data found for ${safeUsername}.`)
     }
 
-    const message = payload?.details || payload?.error || `API returned ${response.status}.`
+    const message =
+      formatApiError(payload?.details) ||
+      formatApiError(payload?.error) ||
+      `API returned ${response.status}.`
     throw new Error(`Failed to fetch ${safeUsername}. ${message}`)
   }
 

@@ -4,11 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "start": "node server/index.js",
+    "start": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "dev:client": "vite",
-    "dev": "node scripts/dev.mjs",
+    "dev": "vite",
     "preview": "vite preview"
   },
   "dependencies": {

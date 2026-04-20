@@ -1,11 +1,6 @@
-import http from 'node:http'
-
-const PORT = Number.parseInt(process.env.PORT ?? '8787', 10)
-const HOST = process.env.HOST ?? '127.0.0.1'
 const SYNC_BASE_URL = 'https://sync.runescape.wiki/runelite/player'
 const MIRROR_BASE_URL = 'https://r.jina.ai/http://sync.runescape.wiki/runelite/player'
 const DEFAULT_LEAGUE_ID = 'DEMONIC_PACTS_LEAGUE'
-const ALLOW_REMOTE_CLIENTS = process.env.ALLOW_REMOTE_CLIENTS === 'true'
 const REQUEST_TIMEOUT_MS = readPositiveInteger(process.env.REQUEST_TIMEOUT_MS, 8000)
 const RATE_LIMIT_WINDOW_MS = readPositiveInteger(process.env.RATE_LIMIT_WINDOW_MS, 60_000)
 const RATE_LIMIT_MAX_REQUESTS = readPositiveInteger(process.env.RATE_LIMIT_MAX_REQUESTS, 60)
@@ -28,13 +23,12 @@ function readPositiveInteger(rawValue, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
-function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-  })
-  response.end(JSON.stringify(payload))
+function sendJson(res, statusCode, payload) {
+  res.statusCode = statusCode
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-store')
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.end(JSON.stringify(payload))
 }
 
 function safeUsername(value) {
@@ -66,6 +60,31 @@ function extractJsonObject(rawText) {
   }
 
   return JSON.parse(rawText.slice(firstBrace, lastBrace + 1))
+}
+
+async function fetchWithTimeout(url, options) {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new UpstreamError(
+        `Upstream timeout after ${REQUEST_TIMEOUT_MS}ms.`,
+        504,
+        'Request aborted by timeout.',
+      )
+    }
+
+    const message = error instanceof Error ? error.message : 'Unknown fetch error'
+    throw new UpstreamError('Network error while contacting upstream.', 502, message)
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 async function readDirect(remoteUrl) {
@@ -101,33 +120,6 @@ async function readMirror(mirrorUrl) {
   return extractJsonObject(text)
 }
 
-function fetchWithTimeout(url, options) {
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => {
-    controller.abort()
-  }, REQUEST_TIMEOUT_MS)
-
-  return fetch(url, {
-    ...options,
-    signal: controller.signal,
-  })
-    .catch((error) => {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new UpstreamError(
-          `Upstream timeout after ${REQUEST_TIMEOUT_MS}ms.`,
-          504,
-          'Request aborted by timeout.',
-        )
-      }
-
-      const message = error instanceof Error ? error.message : 'Unknown fetch error'
-      throw new UpstreamError('Network error while contacting upstream.', 502, message)
-    })
-    .finally(() => {
-      clearTimeout(timeoutId)
-    })
-}
-
 function getCachedPayload(username) {
   const key = username.toLowerCase()
   const cached = PLAYER_CACHE.get(key)
@@ -159,6 +151,7 @@ function setCachedPayload(username, payload) {
     if (value.expiresAt <= Date.now()) {
       PLAYER_CACHE.delete(entryKey)
     }
+
     if (PLAYER_CACHE.size <= 500) {
       break
     }
@@ -202,31 +195,11 @@ async function readRemotePlayer(username) {
 }
 
 function isNoUserDataPayload(payload) {
-  return (
-    payload &&
-    typeof payload === 'object' &&
-    payload.code === 'NO_USER_DATA'
-  )
+  return payload && typeof payload === 'object' && payload.code === 'NO_USER_DATA'
 }
 
-function peerAddress(request) {
-  return request.socket.remoteAddress ?? 'unknown'
-}
-
-function isLoopbackAddress(address) {
-  return (
-    address === '127.0.0.1' ||
-    address === '::1' ||
-    address === '::ffff:127.0.0.1'
-  )
-}
-
-function isTrustedPeer(request) {
-  if (ALLOW_REMOTE_CLIENTS) {
-    return true
-  }
-
-  return isLoopbackAddress(peerAddress(request))
+function getClientIp(req) {
+  return req.socket?.remoteAddress ?? 'unknown'
 }
 
 function consumeRateLimit(key) {
@@ -268,13 +241,13 @@ function consumeRateLimit(key) {
   }
 }
 
-function isAllowedOrigin(request) {
-  const originHeader = request.headers.origin
+function isAllowedOrigin(req) {
+  const originHeader = req.headers.origin
   if (!originHeader) {
     return true
   }
 
-  const hostHeader = request.headers.host
+  const hostHeader = req.headers.host
   if (!hostHeader) {
     return false
   }
@@ -287,66 +260,66 @@ function isAllowedOrigin(request) {
   }
 }
 
-const server = http.createServer(async (request, response) => {
-  const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+function toErrorMessage(error, username) {
+  const statusCode = error && typeof error.statusCode === 'number' ? error.statusCode : 502
+  const details = error instanceof Error && error.details ? error.details : ''
+  const logMessage = error instanceof Error ? error.message : 'Unknown upstream failure'
 
-  if (!isTrustedPeer(request)) {
-    sendJson(response, 403, { error: 'API access is restricted.' })
+  return {
+    statusCode: statusCode === 504 ? 504 : 502,
+    logMessage,
+    details,
+    body: {
+      error: `Could not reach RuneScape Wiki sync API for ${username}.`,
+    },
+  }
+}
+
+export default async function handler(req, res) {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`)
+
+  if (!isAllowedOrigin(req)) {
+    sendJson(res, 403, { error: 'Forbidden origin.' })
     return
   }
 
-  if (!isAllowedOrigin(request)) {
-    sendJson(response, 403, { error: 'Forbidden origin.' })
-    return
-  }
-
-  if (url.pathname === '/health') {
-    if (request.method !== 'GET') {
-      sendJson(response, 405, { error: 'Method not allowed.' })
-      return
-    }
-
-    sendJson(response, 200, { ok: true })
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: 'Method not allowed.' })
     return
   }
 
   const match = url.pathname.match(/^\/api\/player\/([^/]+)$/)
   if (!match) {
-    sendJson(response, 404, { error: 'Not found' })
-    return
-  }
-
-  if (request.method !== 'GET') {
-    sendJson(response, 405, { error: 'Method not allowed.' })
-    return
-  }
-
-  const clientIp = peerAddress(request)
-  const rateLimit = consumeRateLimit(clientIp)
-
-  if (rateLimit.limited) {
-    response.setHeader('Retry-After', String(rateLimit.retryAfterSeconds))
-    sendJson(response, 429, {
-      error: 'Too many requests. Please try again shortly.',
-    })
+    sendJson(res, 404, { error: 'Not found' })
     return
   }
 
   const decodedUsername = decodePathSegment(match[1] ?? '')
   if (decodedUsername === null) {
-    sendJson(response, 400, { error: 'Username has invalid URL encoding.' })
+    sendJson(res, 400, { error: 'Username has invalid URL encoding.' })
     return
   }
 
   const username = safeUsername(decodedUsername)
   if (!username) {
-    sendJson(response, 400, { error: 'Username is required.' })
+    sendJson(res, 400, { error: 'Username is required.' })
     return
   }
 
   if (!isValidUsername(username)) {
-    sendJson(response, 400, {
+    sendJson(res, 400, {
       error: 'Username must be 1-12 chars using letters, numbers, spaces, underscores, or hyphens.',
+    })
+    return
+  }
+
+  const clientIp = getClientIp(req)
+  const rateLimit = consumeRateLimit(clientIp)
+
+  if (rateLimit.limited) {
+    res.setHeader('Retry-After', String(rateLimit.retryAfterSeconds))
+    sendJson(res, 429, {
+      error: 'Too many requests. Please try again shortly.',
     })
     return
   }
@@ -355,28 +328,19 @@ const server = http.createServer(async (request, response) => {
     const payload = await readRemotePlayer(username)
 
     if (isNoUserDataPayload(payload)) {
-      sendJson(response, 404, {
+      sendJson(res, 404, {
         code: 'NO_USER_DATA',
         error: `No RuneScape Wiki sync data found for ${username}.`,
       })
       return
     }
 
-    sendJson(response, 200, payload)
+    sendJson(res, 200, payload)
   } catch (error) {
-    const upstreamStatusCode =
-      error && typeof error.statusCode === 'number' ? error.statusCode : 502
-    const statusCode = upstreamStatusCode === 504 ? 504 : 502
-    const logMessage = error instanceof Error ? error.message : 'Unknown upstream failure'
-    const details = error instanceof Error && error.details ? error.details : ''
-    console.error(`[upstream-failure] user=${username} ip=${clientIp} status=${upstreamStatusCode} ${logMessage}${details ? ` | ${details}` : ''}`)
-
-    sendJson(response, statusCode, {
-      error: `Could not reach RuneScape Wiki sync API for ${username}.`,
-    })
+    const formatted = toErrorMessage(error, username)
+    console.error(
+      `[upstream-failure] user=${username} ip=${clientIp} status=${formatted.statusCode} ${formatted.logMessage}${formatted.details ? ` | ${formatted.details}` : ''}`,
+    )
+    sendJson(res, formatted.statusCode, formatted.body)
   }
-})
-
-server.listen(PORT, HOST, () => {
-  console.log(`OSRS Leagues API server listening on http://${HOST}:${PORT}`)
-})
+}
