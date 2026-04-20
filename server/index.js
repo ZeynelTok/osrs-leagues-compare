@@ -364,11 +364,12 @@ const server = http.createServer(async (request, response) => {
 
     sendJson(response, 200, payload)
   } catch (error) {
-    const statusCode =
+    const upstreamStatusCode =
       error && typeof error.statusCode === 'number' ? error.statusCode : 502
+    const statusCode = upstreamStatusCode === 504 ? 504 : 502
     const logMessage = error instanceof Error ? error.message : 'Unknown upstream failure'
     const details = error instanceof Error && error.details ? error.details : ''
-    console.error(`[upstream-failure] user=${username} ip=${clientIp} status=${statusCode} ${logMessage}${details ? ` | ${details}` : ''}`)
+    console.error(`[upstream-failure] user=${username} ip=${clientIp} status=${upstreamStatusCode} ${logMessage}${details ? ` | ${details}` : ''}`)
 
     sendJson(response, statusCode, {
       error: `Could not reach RuneScape Wiki sync API for ${username}.`,
